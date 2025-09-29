@@ -1,4 +1,5 @@
 import json
+import time
 import os
 import shutil
 from copy import deepcopy
@@ -32,7 +33,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         ocr_kwargs: Optional[dict] = None,
         ad_hoc_recognizers: Optional[List[PatternRecognizer]] = None,
         **text_analyzer_kwargs,
-    ) -> Tuple[pydicom.dataset.FileDataset, List[Dict[str, int]]]:
+    ) -> Tuple[pydicom.dataset.FileDataset, List[Dict[str, int]], dict]:
         """Redact method to redact the given DICOM image and return redacted bboxes.
 
         Please note, this method duplicates the image, creates a
@@ -79,14 +80,20 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
 
         # Detect PII
-        analyzer_results = self._get_analyzer_results(
-            padded_image_pil,
-            instance,
-            use_metadata,
-            ocr_kwargs,
-            ad_hoc_recognizers,
-            **text_analyzer_kwargs,
-        )
+        try:
+            analyzer_results, ocr_result = self._get_analyzer_results(
+                padded_image_pil,
+                instance,
+                use_metadata,
+                ocr_kwargs,
+                ad_hoc_recognizers,
+                **text_analyzer_kwargs,
+            )
+        except Exception as e:
+            # Handle case where _get_analyzer_results fails
+            analyzer_results = []
+            ocr_result = {"error": str(e)}
+            print(f"Error in _get_analyzer_results: {e}")
 
         # Redact all bounding boxes from DICOM file
         analyzer_bboxes = self.bbox_processor.get_bboxes_from_analyzer_results(
@@ -95,7 +102,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
         bboxes = self.bbox_processor.remove_bbox_padding(analyzer_bboxes, padding_width)
         redacted_image = self._add_redact_box(instance, bboxes, crop_ratio, fill)
 
-        return redacted_image, bboxes
+        return redacted_image, bboxes, ocr_result
 
     def redact(
         self,
@@ -125,7 +132,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
         :return: DICOM instance with redacted pixel data.
         """
-        redacted_image, _ = self.redact_and_return_bbox(
+        redacted_image, _, ocr_result = self.redact_and_return_bbox(
             image=image,
             fill=fill,
             padding_width=padding_width,
@@ -135,7 +142,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
             **text_analyzer_kwargs,
         )
 
-        return redacted_image
+        return redacted_image, ocr_result
 
     def redact_from_file(
         self,
@@ -486,7 +493,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
             raise ValueError("Enter a positive value for padding")
         elif padding_width >= 100:
             raise ValueError(
-                "Excessive padding width entered. Please use a width under 100 pixels."
+                "Excessive padding width entered. Please use a width under 100 pixels."  # noqa: E501
             )
 
         # Select most common color as border color
@@ -907,6 +914,7 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
 
         :return: Analyzer results.
         """
+        start_time_meta = time.time()
         # Check the ad-hoc recognizers list
         self._check_ad_hoc_recognizer_list(ad_hoc_recognizers)
 
@@ -923,22 +931,27 @@ class DicomImageRedactorEngine(ImageRedactorEngine):
             elif isinstance(ad_hoc_recognizers, list):
                 ad_hoc_recognizers.append(deny_list_recognizer)
 
+        end_time_meta = time.time()
+        total_time_meta = end_time_meta - start_time_meta
+
         # Detect PII
         if ad_hoc_recognizers is None:
-            analyzer_results = self.image_analyzer_engine.analyze(
+            analyzer_results, timings = self.image_analyzer_engine.analyze(
                 image,
                 ocr_kwargs=ocr_kwargs,
                 **text_analyzer_kwargs,
             )
         else:
-            analyzer_results = self.image_analyzer_engine.analyze(
+            analyzer_results, timings = self.image_analyzer_engine.analyze(
                 image,
                 ocr_kwargs=ocr_kwargs,
                 ad_hoc_recognizers=ad_hoc_recognizers,
                 **text_analyzer_kwargs,
             )
 
-        return analyzer_results
+        timings["total_time_meta"] = total_time_meta
+        return analyzer_results, timings
+        # return analyzer_results
 
     @staticmethod
     def _save_bbox_json(output_dcm_path: str, bboxes: List[Dict[str, int]]) -> None:
