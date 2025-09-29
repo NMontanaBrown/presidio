@@ -1,4 +1,5 @@
 import io
+import time
 from copy import deepcopy
 from typing import Dict, List, Optional, Tuple, Union
 
@@ -54,9 +55,21 @@ class ImageAnalyzerEngine:
         """
         # Perform OCR
         perform_ocr_kwargs, ocr_threshold = self._parse_ocr_kwargs(ocr_kwargs)
+        start_time_preprocess = time.time()
         image, preprocessing_metadata = self.image_preprocessor.preprocess_image(image)
-        ocr_result = self.ocr.perform_ocr(image, **perform_ocr_kwargs)
-        ocr_result = self.remove_space_boxes(ocr_result)
+        end_time_preprocess = time.time()
+        total_time_preprocess = end_time_preprocess - start_time_preprocess
+        start_time_ocr = time.time()
+        ocr_result_original = self.ocr.perform_ocr(image, **perform_ocr_kwargs)
+        end_time_ocr = time.time()
+        total_time_ocr = end_time_ocr - start_time_ocr
+        ocr_result = self.remove_space_boxes(ocr_result_original)
+        if "_timing_info" in ocr_result_original:
+            ocr_timings = ocr_result_original["_timing_info"]
+        else:
+            ocr_timings = {}
+        if "_timing_info" in ocr_result:
+            ocr_result.pop("_timing_info")
 
         if preprocessing_metadata and ("scale_factor" in preprocessing_metadata):
             ocr_result = self._scale_bbox_results(
@@ -68,6 +81,7 @@ class ImageAnalyzerEngine:
             ocr_result = self.threshold_ocr_result(ocr_result, ocr_threshold)
 
         # Analyze text
+        start_time_analyzer = time.time()
         text = self.ocr.get_text_from_ocr_dict(ocr_result)
 
         # Difines English as default language, if not specified
@@ -80,8 +94,12 @@ class ImageAnalyzerEngine:
         bboxes = self.map_analyzer_results_to_bounding_boxes(
             analyzer_result, ocr_result, text, allow_list
         )
-
-        return bboxes
+        end_time_analyzer = time.time()
+        total_time_analyzer = end_time_analyzer - start_time_analyzer
+        ocr_timings["total_time_preprocess_ocr"] = total_time_preprocess
+        ocr_timings["total_time_ocr"] = total_time_ocr
+        ocr_timings["total_time_analyzer"] = total_time_analyzer
+        return bboxes, ocr_timings
 
     @staticmethod
     def threshold_ocr_result(ocr_result: dict, ocr_threshold: float) -> dict:
@@ -125,6 +143,9 @@ class ImageAnalyzerEngine:
         # Only retain items with text
         filtered_ocr_result = {}
         for key in list(ocr_result.keys()):
+            if key == "_timing_info":
+                # Skip timing info as it's not a list
+                continue
             filtered_ocr_result[key] = [ocr_result[key][i] for i in idx]
 
         return filtered_ocr_result
@@ -345,11 +366,11 @@ class ImageAnalyzerEngine:
                 has_same_position = (
                     ocr_bbox["left"] == analyzer_bbox["left"]
                     and ocr_bbox["top"] == analyzer_bbox["top"]
-                )
+                )  # noqa: E501
                 has_same_dimension = (
                     ocr_bbox["width"] == analyzer_bbox["width"]
                     and ocr_bbox["height"] == analyzer_bbox["height"]
-                )
+                )  # noqa: E501
                 is_same = has_same_position is True and has_same_dimension is True
 
                 if is_same is True:
